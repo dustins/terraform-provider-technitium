@@ -189,6 +189,27 @@ by hand this way has address records that look managed and inert at the same tim
 Removing them from the configuration deletes them, which is usually what you want;
 re-adding one re-enables it and silences the app again.
 
+#### APP records and DNSSEC are mutually exclusive
+
+~> **A zone cannot be both DNSSEC-signed and hold an `APP` record.** Technitium
+refuses this in both directions, and the refusals are server-side rather than
+anything this provider imposes. Measured on 15.x:
+
+* signing a zone that already holds an `APP` record fails with
+  `Cannot sign RRSet: The record type [APP] is not supported by DNSSEC signed
+  primary zones.`
+* adding an `APP` record to an already-signed zone fails with
+  `The record type is not supported by DNSSEC signed primary zones.`
+
+The reason is structural: a DNS app computes its answer per query, while
+Technitium's DNSSEC implementation signs records ahead of serving them, so there
+is nothing stable to sign. If a namespace has to be signed, it cannot use DNS
+apps — put the app-served names in a separate, unsigned zone.
+
+Note the ordering trap for anyone building a zone and signing it in the same
+apply: the sign attempt is what fails, so the zone is left unsigned with the
+`APP` record in place, which is the opposite of the safe outcome.
+
 #### The app must already be installed
 
 This provider does not install DNS apps — install them from the web console's Apps tab

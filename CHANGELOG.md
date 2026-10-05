@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CNAME-returning handlers), so migrating a round-robin name to an `APP` record has to
   retire the old address records. A **disabled** address record does not mask the app.
   ([#24])
+- A zone cannot be both DNSSEC-signed and hold an `APP` record. Technitium refuses it in
+  both directions (measured on 15.x): signing a zone holding an `APP` record fails with
+  "The record type [APP] is not supported by DNSSEC signed primary zones", and adding one
+  to a signed zone fails the same way. App-served names need their own unsigned zone.
+  ([#24])
 - The provider does not manage a record's disabled flag, and `APP` records are where that
   gap is most visible: a name migrated by hand, by disabling its address records rather
   than deleting them, keeps those records in `records/get`, so Terraform goes on managing
