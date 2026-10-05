@@ -4,6 +4,7 @@
 package inputvalidation
 
 import (
+	"encoding/json"
 	"net"
 	"regexp"
 	"strings"
@@ -106,4 +107,34 @@ func isIPAddress(s string) bool {
 // isInRange returns true if val is between min and max (inclusive).
 func isInRange(val, min, max int64) bool {
 	return val >= min && val <= max
+}
+
+// classPathPattern matches a .NET class path of the shape DNS apps use:
+// dot-separated identifiers, at least two of them, as in
+// "WeightedRoundRobin.Address" or "SplitHorizon.SimpleAddress".
+//
+// Deliberately a shape check and nothing more. The set of legal class paths is
+// whatever the installed apps expose, which is a server fact and cannot be
+// known at plan time; the provider checks the real thing against
+// /api/apps/list at apply time. What this catches is the mistake that check
+// cannot phrase well -- an app NAME in the class path field -- because app
+// names contain spaces and no dots.
+var classPathPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$`)
+
+// isLikelyClassPath returns true if s has the shape of a DNS app class path.
+func isLikelyClassPath(s string) bool {
+	return classPathPattern.MatchString(s)
+}
+
+// looksLikeJSON reports whether Technitium will try to parse s as JSON. It
+// tests the same condition the server does: a leading { or [, after
+// whitespace.
+func looksLikeJSON(s string) bool {
+	t := strings.TrimSpace(s)
+	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
+}
+
+// isValidJSON reports whether s parses as JSON.
+func isValidJSON(s string) bool {
+	return json.Valid([]byte(s))
 }

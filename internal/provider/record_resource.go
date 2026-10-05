@@ -42,27 +42,29 @@ type RecordResource struct {
 }
 
 type RecordResourceModel struct {
-	ID                types.String `tfsdk:"id"`
-	Zone              types.String `tfsdk:"zone"`
-	Name              types.String `tfsdk:"name"`
-	Type              types.String `tfsdk:"type"`
-	TTL               types.Int64  `tfsdk:"ttl"`
-	Value             types.String `tfsdk:"value"`
-	Priority          types.Int64  `tfsdk:"priority"`
-	Weight            types.Int64  `tfsdk:"weight"`
-	Port              types.Int64  `tfsdk:"port"`
-	CAAFlags          types.Int64  `tfsdk:"caa_flags"`
-	CAATag            types.String `tfsdk:"caa_tag"`
-	Protocol          types.String `tfsdk:"protocol"`
-	ForwarderPriority types.Int64  `tfsdk:"forwarder_priority"`
-	DNSSECValidation  types.Bool   `tfsdk:"dnssec_validation"`
-	ProxyType         types.String `tfsdk:"proxy_type"`
-	ProxyAddress      types.String `tfsdk:"proxy_address"`
-	ProxyPort         types.Int64  `tfsdk:"proxy_port"`
-	ProxyUsername     types.String `tfsdk:"proxy_username"`
-	ProxyPassword     types.String `tfsdk:"proxy_password"`
-	Overwrite         types.Bool   `tfsdk:"overwrite"`
-	Comments          types.String `tfsdk:"comments"`
+	ID                types.String    `tfsdk:"id"`
+	Zone              types.String    `tfsdk:"zone"`
+	Name              types.String    `tfsdk:"name"`
+	Type              types.String    `tfsdk:"type"`
+	TTL               types.Int64     `tfsdk:"ttl"`
+	Value             types.String    `tfsdk:"value"`
+	Priority          types.Int64     `tfsdk:"priority"`
+	Weight            types.Int64     `tfsdk:"weight"`
+	Port              types.Int64     `tfsdk:"port"`
+	CAAFlags          types.Int64     `tfsdk:"caa_flags"`
+	CAATag            types.String    `tfsdk:"caa_tag"`
+	Protocol          types.String    `tfsdk:"protocol"`
+	ForwarderPriority types.Int64     `tfsdk:"forwarder_priority"`
+	DNSSECValidation  types.Bool      `tfsdk:"dnssec_validation"`
+	ProxyType         types.String    `tfsdk:"proxy_type"`
+	ProxyAddress      types.String    `tfsdk:"proxy_address"`
+	ProxyPort         types.Int64     `tfsdk:"proxy_port"`
+	ProxyUsername     types.String    `tfsdk:"proxy_username"`
+	ProxyPassword     types.String    `tfsdk:"proxy_password"`
+	AppName           types.String    `tfsdk:"app_name"`
+	RecordData        recordDataValue `tfsdk:"record_data"`
+	Overwrite         types.Bool      `tfsdk:"overwrite"`
+	Comments          types.String    `tfsdk:"comments"`
 	// Computed
 	LastModified types.String `tfsdk:"last_modified"`
 }
@@ -94,7 +96,7 @@ func (r *RecordResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				},
 			},
 			"type": schema.StringAttribute{
-				Description: "DNS record type: A, AAAA, CNAME, MX, TXT, SRV, PTR, NS, CAA, FWD.",
+				Description: "DNS record type: A, AAAA, CNAME, MX, TXT, SRV, PTR, NS, CAA, FWD, APP.",
 				Required:    true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
@@ -107,7 +109,7 @@ func (r *RecordResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Default:     int64default.StaticInt64(3600),
 			},
 			"value": schema.StringAttribute{
-				Description: "Record data. For A/AAAA: IP address. For CNAME: target domain. For MX: exchange domain. For TXT: text data. For SRV: target. For PTR: domain name. For NS: nameserver. For CAA: value. For FWD: forwarder address.",
+				Description: "Record data. For A/AAAA: IP address. For CNAME: target domain. For MX: exchange domain. For TXT: text data. For SRV: target. For PTR: domain name. For NS: nameserver. For CAA: value. For FWD: forwarder address. For APP: the DNS app class path (e.g. `WeightedRoundRobin.Address`) — the handler inside the app that answers the query, not the app name.",
 				Required:    true,
 			},
 			"priority": schema.Int64Attribute{
@@ -180,6 +182,34 @@ func (r *RecordResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Optional:    true,
 				Sensitive:   true,
 			},
+			"app_name": schema.StringAttribute{
+				Description: "Name of the installed DNS app that serves this record, exactly as the " +
+					"server reports it (e.g. `Weighted Round Robin`). Required for APP records. " +
+					"The app must already be installed; this provider does not install DNS apps.",
+				Optional: true,
+			},
+			"record_data": schema.StringAttribute{
+				Description: "App-specific configuration for an APP record, as required by the app — " +
+					"usually a JSON document, so `jsonencode(...)` or a heredoc. Optional: some apps " +
+					"need no configuration. Equivalent JSON that differs only in key order or " +
+					"whitespace does not register as a change.",
+				Optional: true,
+				// Computed for the same reason comments is: Technitium's update
+				// API assigns recordData unconditionally, so omitting it stores
+				// the empty string rather than leaving the stored data alone.
+				// Every update must therefore send a value, and for an omitted
+				// attribute that value is whatever the server already holds.
+				Computed: true,
+				// Equivalent JSON compares equal, which keeps a reformatted
+				// payload from reading as drift on refresh or as an
+				// inconsistent result after apply. Suppressing the PLAN is a
+				// separate problem the framework does not route through
+				// semantic equality -- see modifyAPPRecordDataPlan.
+				CustomType: recordDataType{},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
 			"overwrite": schema.BoolAttribute{
 				Description: "Replace existing record set for this type. Default: true.",
 				Optional:    true,
@@ -238,6 +268,87 @@ func (r *RecordResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 			&resp.Diagnostics,
 		)
 	}
+
+	r.modifyAPPRecordDataPlan(ctx, req, resp)
+}
+
+// modifyAPPRecordDataPlan keeps a cosmetic change to an APP record's
+// record_data from planning an update.
+//
+// Reformatting the JSON -- reindenting a heredoc, reordering two keys -- does
+// not change what the DNS app reads, but it does change the string, so the
+// plan rewrites the record for nothing.
+//
+// This has to live in the resource's ModifyPlan rather than in an attribute
+// plan modifier or in the type's semantic equality, and neither of those is an
+// oversight:
+//
+//   - Semantic equality (recordDataType) is never consulted while planning.
+//     The framework applies it to Create, Update, Read and data source
+//     responses only -- see fwserver.SchemaSemanticEquality's call sites. It
+//     keeps state and apply results consistent; it cannot make a plan empty.
+//   - An attribute plan modifier runs too late. The framework marks every
+//     Computed attribute that is null in the configuration as unknown as soon
+//     as the proposed new state differs from prior state, and only then runs
+//     attribute plan modifiers (server_planresourcechange.go). Copying the
+//     prior record_data over the planned one there does suppress the diff on
+//     record_data -- but id and last_modified are already "known after apply",
+//     so the plan still reads `0 to add, 1 to change, 0 to destroy`. Measured.
+//
+// The resource's ModifyPlan runs after both, which is the first point where
+// the unknowns can be put back.
+func (r *RecordResource) modifyAPPRecordDataPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.State.Raw.IsNull() {
+		return // create: nothing to compare against
+	}
+
+	var plan, state RecordResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if plan.Type.ValueString() != "APP" {
+		return
+	}
+	if plan.RecordData.IsNull() || plan.RecordData.IsUnknown() ||
+		state.RecordData.IsNull() || state.RecordData.IsUnknown() {
+		return
+	}
+	// An identical string needs no help, and a genuinely different document
+	// must keep its diff.
+	if plan.RecordData.ValueString() == state.RecordData.ValueString() {
+		return
+	}
+	if !jsonEquivalent(state.RecordData.ValueString(), plan.RecordData.ValueString()) {
+		return
+	}
+
+	// The two spellings mean the same thing, so keep the stored one: there is
+	// no reason to rewrite the record just to restyle its payload.
+	plan.RecordData = state.RecordData
+	plan.ID = state.ID
+	plan.LastModified = state.LastModified
+
+	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// If record_data was the only difference, the plan now equals prior state
+	// and Terraform reports no changes. Otherwise something else really is
+	// changing, so the computed attributes have to go back to unknown -- the
+	// apply will set them, and claiming otherwise would be an inconsistent
+	// result. Comparing the raw values rather than the structs keeps this
+	// correct if the model gains a field later.
+	if resp.Plan.Raw.Equal(req.State.Raw) {
+		return
+	}
+
+	plan.ID = types.StringUnknown()
+	plan.LastModified = types.StringUnknown()
+	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
 }
 
 func (r *RecordResource) ConfigValidators(ctx context.Context) []resource.ConfigValidator {
@@ -270,6 +381,27 @@ func (r *RecordResource) Create(ctx context.Context, req resource.CreateRequest,
 		}
 	}
 
+	if plan.Type.ValueString() == "APP" {
+		if !r.guardAPPRecord(ctx, &plan, &resp.Diagnostics) {
+			return
+		}
+		// A name holds at most one APP record, so an existing one is a
+		// conflict rather than a sibling. Caught here so the operator gets
+		// the import path instead of the server's "use overwrite option"
+		// message, which would silently discard the app's configuration.
+		if !plan.Overwrite.ValueBool() {
+			n, err := r.appMatchCount(ctx, &plan)
+			if err != nil {
+				resp.Diagnostics.AddError("Error checking for an existing APP record", err.Error())
+				return
+			}
+			if n > 0 {
+				resp.Diagnostics.AddError("APP record already exists", appCreateConflictDetail(&plan))
+				return
+			}
+		}
+	}
+
 	params := r.buildAddParams(&plan)
 	record, err := r.client.RecordAdd(ctx,
 		plan.Name.ValueString(),
@@ -289,6 +421,15 @@ func (r *RecordResource) Create(ctx context.Context, req resource.CreateRequest,
 	// An omitted comment plans as unknown; resolve it to what the server stored.
 	if plan.Comments.IsUnknown() || plan.Comments.IsNull() {
 		plan.Comments = types.StringValue(record.Comments)
+	}
+	// Likewise record_data: omitted, the server stores "" (see RecordAdd).
+	// Unknown must never reach state.
+	if plan.Type.ValueString() == "APP" {
+		if plan.RecordData.IsUnknown() || plan.RecordData.IsNull() {
+			plan.RecordData = newRecordDataValue(client.RecordAppData(record.RData))
+		}
+	} else if plan.RecordData.IsUnknown() {
+		plan.RecordData = newRecordDataNull()
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -348,6 +489,14 @@ func (r *RecordResource) Read(ctx context.Context, req resource.ReadRequest, res
 			}
 			if tag, ok := rec.RData["tag"]; ok {
 				state.CAATag = types.StringValue(fmt.Sprintf("%v", tag))
+			}
+
+			// APP fields. The class path arrives via state.Value above
+			// (RecordValueParam maps APP to classPath); these are the two
+			// that have nowhere else to go.
+			if recordType == "APP" {
+				state.AppName = types.StringValue(client.RecordAppName(rec.RData))
+				state.RecordData = newRecordDataValue(client.RecordAppData(rec.RData))
 			}
 
 			// FWD fields
@@ -416,6 +565,12 @@ func (r *RecordResource) Update(ctx context.Context, req resource.UpdateRequest,
 		}
 	}
 
+	if plan.Type.ValueString() == "APP" {
+		if !r.guardAPPRecord(ctx, &plan, &resp.Diagnostics) {
+			return
+		}
+	}
+
 	params := r.buildUpdateParams(&state, &plan)
 
 	// Technitium's update API assigns the comments parameter unconditionally:
@@ -457,12 +612,22 @@ func (r *RecordResource) Update(ctx context.Context, req resource.UpdateRequest,
 			if plan.Comments.IsUnknown() || plan.Comments.IsNull() {
 				plan.Comments = types.StringValue(rec.Comments)
 			}
+			if plan.Type.ValueString() == "APP" && (plan.RecordData.IsUnknown() || plan.RecordData.IsNull()) {
+				plan.RecordData = newRecordDataValue(client.RecordAppData(rec.RData))
+			}
 			break
 		}
 	}
 	// Unknown must never reach state, even if the read-back missed the record.
 	if plan.Comments.IsUnknown() || plan.Comments.IsNull() {
 		plan.Comments = types.StringValue(params["comments"])
+	}
+	if plan.Type.ValueString() == "APP" {
+		if plan.RecordData.IsUnknown() || plan.RecordData.IsNull() {
+			plan.RecordData = newRecordDataValue(params["recordData"])
+		}
+	} else if plan.RecordData.IsUnknown() {
+		plan.RecordData = newRecordDataNull()
 	}
 
 	// Rebuild ID — value may have changed
@@ -629,11 +794,30 @@ func (r *RecordResource) buildAddParams(model *RecordResourceModel) map[string]s
 		addOptionalFWDProxyParams(params, model)
 	}
 
+	// APP. classPath is already set above via RecordValueParam. appName is
+	// mandatory; recordData is sent even when empty so that add and update
+	// agree on what an omitted attribute means (the empty string, which is
+	// what the server stores either way).
+	if recordType == "APP" {
+		params["appName"] = model.AppName.ValueString()
+		params["recordData"] = appRecordDataParam(model)
+	}
+
 	if !model.Comments.IsNull() && !model.Comments.IsUnknown() {
 		params["comments"] = model.Comments.ValueString()
 	}
 
 	return params
+}
+
+// appRecordDataParam returns the recordData value to send for an APP record.
+// An unset or still-unknown attribute becomes the empty string, which is what
+// Technitium stores for an add that omits the parameter.
+func appRecordDataParam(model *RecordResourceModel) string {
+	if model.RecordData.IsNull() || model.RecordData.IsUnknown() {
+		return ""
+	}
+	return model.RecordData.ValueString()
 }
 
 // buildUpdateParams creates type-specific API parameters for record update.
@@ -760,6 +944,19 @@ func (r *RecordResource) buildUpdateParams(state, plan *RecordResourceModel) map
 			params["dnssecValidation"] = fmt.Sprintf("%t", state.DNSSECValidation.ValueBool())
 		}
 		addOptionalFWDProxyParams(params, plan)
+	case "APP":
+		// No current/new pairing exists for APP records, and none is needed:
+		// a name holds at most one, so domain + zone + type already names it.
+		// All three fields are the NEW values.
+		//
+		// All three are sent unconditionally. appName is mandatory, and
+		// omitting recordData does not mean "leave it alone" -- it assigns the
+		// empty string, wiping the app's configuration. A TTL-only change
+		// reaches here with recordData unchanged in the plan, and it has to go
+		// on the wire anyway. See RecordUpdate.
+		params["appName"] = plan.AppName.ValueString()
+		params["classPath"] = newValue
+		params["recordData"] = appRecordDataParam(plan)
 	default:
 		params[valueParam] = newValue
 	}
@@ -791,6 +988,16 @@ func (r *RecordResource) buildDeleteParams(model *RecordResourceModel) map[strin
 	params := map[string]string{}
 	recordType := model.Type.ValueString()
 	value := model.Value.ValueString()
+
+	// APP records are addressed by name alone. The server ignores appName,
+	// classPath and recordData on delete -- a delete carrying deliberately
+	// wrong values for all three still removed the record -- and since a name
+	// holds at most one APP record there is nothing for them to disambiguate.
+	// Sending them would state an intent the server does not act on, so the
+	// request carries only domain, zone and type.
+	if recordType == "APP" {
+		return params
+	}
 
 	params[client.RecordValueParam(recordType)] = value
 

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `technitium_record`: `APP` record support, for handing a name to an installed DNS app
+  (weighted round robin, split horizon, failover, and so on). New `app_name` and
+  `record_data` attributes; `value` carries the app's class path. Contributed by
+  [@dustins](https://github.com/dustins). ([#24])
+- `technitium_record`: `app_name` and the class path are checked against the apps installed
+  on the server before an `APP` record is written. Technitium accepts an unknown app or
+  class path, reports success, and stores a record that resolves to nothing; a class that
+  exists but is not an app-record handler fails the same way. The check is best-effort and
+  is skipped when the API token cannot list apps. ([#24])
+- `technitium_record`: equivalent `record_data` JSON no longer plans an update — object key
+  order and whitespace are insignificant, array order is significant — and a value
+  beginning with `{` or `[` is validated as JSON at plan time, which is the condition
+  Technitium itself parses on. ([#24])
+- `client`: `AppList`, `AppStoreList`, and `AppDownloadAndInstall` for the DNS apps API.
+  `AppList` backs the check above; the other two provision the app the acceptance suite
+  needs. ([#24])
+
+### Known limitations
+
+- An **enabled** `A` or `AAAA` record at the same name as an `APP` record masks it
+  completely: the plain record answers and the app never runs, with nothing reported as
+  wrong. Technitium permits the combination (measured on 15.4, for both the address- and
+  CNAME-returning handlers), so migrating a round-robin name to an `APP` record has to
+  retire the old address records. A **disabled** address record does not mask the app.
+  ([#24])
+- The provider does not manage a record's disabled flag, and `APP` records are where that
+  gap is most visible: a name migrated by hand, by disabling its address records rather
+  than deleting them, keeps those records in `records/get`, so Terraform goes on managing
+  them while the configuration cannot express that they are off. Any record the provider
+  creates is enabled. ([#24])
+
 ## [1.3.0] - 2026-10-04
 
 Tested against Technitium DNS Server 15.5.1. The **Breaking** items below can stop an existing
@@ -395,6 +428,7 @@ settings preserve the validator coverage for future runs.
 [#152]: https://github.com/darkhonor/terraform-provider-technitium/issues/152
 [#153]: https://github.com/darkhonor/terraform-provider-technitium/issues/153
 [#23]: https://github.com/darkhonor/terraform-provider-technitium/issues/23
+[#24]: https://github.com/darkhonor/terraform-provider-technitium/issues/24
 [#29]: https://github.com/darkhonor/terraform-provider-technitium/issues/29
 [#30]: https://github.com/darkhonor/terraform-provider-technitium/issues/30
 [#33]: https://github.com/darkhonor/terraform-provider-technitium/issues/33

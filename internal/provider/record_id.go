@@ -24,6 +24,13 @@ const recordIDSeparator = "::"
 //   - SRV: zone::name::SRV::target:priority:weight:port
 //   - CAA: zone::name::CAA::value:flags:tag
 //   - FWD: zone::name::FWD::forwarder:protocol:priority:dnssecValidation
+//   - APP: zone::name::APP::classPath
+//
+// APP takes the simple form because a name holds at most one APP record, so
+// zone + name + type is already unique; the class path rides along because the
+// ID format wants four segments and it is the most useful thing to put there.
+// app_name and record_data are recovered by reading the record, which is also
+// why an import ID does not have to carry them.
 //
 // The FWD form carries dnssecValidation because forwarder/protocol/priority
 // alone do not uniquely identify a record — two forwarders may differ only by
@@ -229,6 +236,20 @@ func recordMatchesState(rec client.Record, state *RecordResourceModel) bool {
 	// Type must match.
 	if rec.Type != recordType {
 		return false
+	}
+
+	// APP is a singleton: a name holds at most one APP record, so type alone
+	// identifies it and the primary-value comparison below must be skipped.
+	//
+	// That skip is the point, not a shortcut. If the class path had to match,
+	// then changing it on the server -- or in the configuration -- would make
+	// Read find no match, call RemoveResource, and plan a create. The create
+	// would then fail against the record that is still sitting there
+	// ("Record already exists"), leaving a configuration that cannot converge.
+	// Matching on type lets a class path, app name or record data change
+	// surface as ordinary drift and be fixed in place by Update.
+	if recordType == "APP" {
+		return true
 	}
 
 	// Primary value must match.

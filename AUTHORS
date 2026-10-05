@@ -57,4 +57,10 @@ Listed in order of first contribution.
   fixed two bugs in it: scope updates wiping standalone reserved leases (the
   `reservedLeases` parameter is now omitted when the attribute is unset), and
   every plan of a `for_each`/`count` scope failing on unknown values in
-  ValidateConfig; regression tests for both.
+  ValidateConfig; regression tests for both. Also `APP` record support on
+  `technitium_record` (`app_name`, `record_data`, and the class path in
+  `value`), with the app and class path checked against the server's installed
+  apps before a record is written, JSON-semantic comparison of `record_data`,
+  and the DNS apps client layer behind them. The APP record API semantics were
+  measured against a live server rather than taken from the upstream docs,
+  which document only the three add parameters. (#24)

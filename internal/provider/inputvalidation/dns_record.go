@@ -12,6 +12,7 @@ import (
 var validRecordTypes = map[string]bool{
 	"A": true, "AAAA": true, "CNAME": true, "MX": true,
 	"NS": true, "PTR": true, "SRV": true, "TXT": true, "CAA": true, "FWD": true,
+	"APP": true,
 }
 
 // registerRecordRules adds all DNS record validation rules to the registry.
@@ -27,6 +28,7 @@ func registerRecordRules(r *Registry) {
 	r.Register(validateSRVRecord())
 	r.Register(validateCAARecord())
 	r.Register(validateFWDRecord())
+	r.Register(validateAPPRecord())
 }
 
 // DefaultRegistry returns a registry pre-loaded with all built-in validation rules.
@@ -54,7 +56,7 @@ func validateRecordType() ValidationRule {
 				return []Finding{{
 					Attribute: "type",
 					Summary:   fmt.Sprintf("Invalid record type: %q", rt),
-					Detail:    "Supported record types are: A, AAAA, CNAME, MX, NS, PTR, SRV, TXT, CAA, FWD (case-sensitive).",
+					Detail:    "Supported record types are: A, AAAA, CNAME, MX, NS, PTR, SRV, TXT, CAA, FWD, APP (case-sensitive).",
 				}}
 			}
 			return nil
@@ -457,6 +459,77 @@ func validateFWDRecord() ValidationRule {
 					Attribute: "forwarder_priority",
 					Summary:   fmt.Sprintf("Invalid FWD record forwarder_priority: %d is negative", priority),
 					Detail:    "FWD record forwarder_priority must be zero or greater; lower values are queried first.",
+				})
+			}
+
+			return findings
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// APP record
+// ---------------------------------------------------------------------------
+
+func validateAPPRecord() ValidationRule {
+	return ValidationRule{
+		Name:        "app_record",
+		Description: "APP record: app_name required, value must be a class path, record_data must be valid JSON when it looks like JSON",
+		Resource:    ResourceRecord,
+		Validate: func(ctx context.Context, config ConfigAccessor) []Finding {
+			rt, ok := config.GetString("type")
+			if !ok || rt != "APP" {
+				return nil
+			}
+			var findings []Finding
+
+			appName, hasAppName := config.GetString("app_name")
+			if !hasAppName || appName == "" {
+				findings = append(findings, Finding{
+					Attribute: "app_name",
+					Summary:   "APP record missing required field: app_name",
+					Detail: "APP records require app_name, the name of an installed DNS app " +
+						`exactly as the server reports it (e.g. "Weighted Round Robin").`,
+				})
+			}
+
+			// value carries the class path. The shape check is here to catch
+			// the one mistake that otherwise produces a record the server
+			// accepts and never answers: putting the app NAME in value.
+			// Technitium validates neither field, so without this the failure
+			// shows up as a name that silently stops resolving.
+			value, hasValue := config.GetString("value")
+			switch {
+			case !hasValue || value == "":
+				findings = append(findings, Finding{
+					Attribute: "value",
+					Summary:   "APP record missing required field: value",
+					Detail: "For an APP record, value is the DNS app class path " +
+						`(e.g. "WeightedRoundRobin.Address") — the handler inside the app that ` +
+						"answers the query, not the app name.",
+				})
+			case !isLikelyClassPath(value):
+				findings = append(findings, Finding{
+					Attribute: "value",
+					Summary:   fmt.Sprintf("Invalid APP record value: %q does not look like a class path", value),
+					Detail: `An APP record's value is a dotted class path such as ` +
+						`"WeightedRoundRobin.Address" or "SplitHorizon.SimpleAddress", not the app ` +
+						`name. Technitium accepts an unrecognized class path without error and ` +
+						`stores a record that resolves to nothing, so it is rejected here instead.`,
+				})
+			}
+
+			// Technitium parses record_data as JSON only when it starts with
+			// { or [, and rejects it at apply time if it then does not parse.
+			// Checking the same condition at plan time turns a failed apply
+			// into a failed plan.
+			if data, hasData := config.GetString("record_data"); hasData && looksLikeJSON(data) && !isValidJSON(data) {
+				findings = append(findings, Finding{
+					Attribute: "record_data",
+					Summary:   "Invalid APP record record_data: not valid JSON",
+					Detail: "record_data begins with { or [, so Technitium will parse it as JSON " +
+						"and refuse the record if it does not parse. Use jsonencode() to build it " +
+						"from Terraform values, or fix the literal.",
 				})
 			}
 

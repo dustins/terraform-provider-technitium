@@ -3,13 +3,13 @@ subcategory: ""
 page_title: "technitium_record Resource - terraform-provider-technitium"
 description: |-
   Manages a DNS record in a Technitium DNS zone. Supports A, AAAA, CNAME, MX, TXT, SRV,
-  PTR, NS, CAA, and FWD record types. Client-side validation ensures type/value compatibility
-  before API calls.
+  PTR, NS, CAA, FWD, and APP record types. Client-side validation ensures type/value
+  compatibility before API calls.
 ---
 
 # technitium\_record (Resource)
 
-Manages a DNS record in a Technitium DNS zone. Supports A, AAAA, CNAME, MX, TXT, SRV, PTR, NS, CAA, and FWD record types. Client-side validation ensures type/value compatibility before API calls.
+Manages a DNS record in a Technitium DNS zone. Supports A, AAAA, CNAME, MX, TXT, SRV, PTR, NS, CAA, FWD, and APP record types. Client-side validation ensures type/value compatibility before API calls.
 
 -> The `overwrite` attribute controls whether this record replaces existing records of the same type at the same name. Default is `true`.
 
@@ -309,6 +309,156 @@ with an Extended DNS Error (`NegativeTrustAnchor`) whose text is the record's co
 visible to any client that queries the zone. Do not put anything in such a comment that
 should not be public.
 
+### APP Records (DNS Apps)
+
+An `APP` record hands a name to an installed [DNS app](https://blog.technitium.com/2021/03/creating-and-running-dns-apps-on.html),
+which computes the answer at query time — weighted load balancing, split-horizon
+answers, failover, and so on.
+
+Three attributes describe one:
+
+* `app_name` — the installed app, named exactly as the server reports it.
+* `value` — the **class path**: the handler inside that app which answers the query.
+  This is not the app name. One app ships several handlers, and they behave differently.
+* `record_data` — the handler's configuration, usually JSON. Optional; a few handlers
+  take none.
+
+```hcl
+# Weighted round-robin load balancing via the "Weighted Round Robin" DNS app.
+#
+# The app must already be installed on the server (Apps tab in the web console,
+# or /api/apps/downloadAndInstall); this provider does not install DNS apps.
+#
+# `value` is the class path -- the handler inside the app that answers the
+# query. `app_name` is the app it belongs to. `record_data` is whatever that
+# handler expects, which for this one is a weighted address list.
+resource "technitium_record" "ntp_weighted" {
+  zone = technitium_zone.internal.name
+  name = "ntp.core.example.com"
+  type = "APP"
+  ttl  = 300
+
+  app_name = "Weighted Round Robin"
+  value    = "WeightedRoundRobin.Address"
+
+  record_data = jsonencode({
+    ipv4Addresses = [
+      { address = "10.1.2.74", weight = 5, enabled = true },
+      { address = "10.1.2.67", weight = 3, enabled = true },
+      { address = "10.1.2.73", weight = 1, enabled = true },
+    ]
+  })
+
+  # An enabled A or AAAA record at this name would win outright and the app
+  # would never answer, with nothing reported as wrong -- so retire the A
+  # records being replaced rather than leaving them declared alongside this.
+  # (A record disabled in the web console does not mask the app, but the
+  # provider cannot express "disabled", so anything it creates is enabled.)
+  overwrite = false
+}
+```
+
+```hcl
+# Split-horizon answers via the "Split Horizon" DNS app: one name resolving
+# differently depending on where the client is.
+#
+# A second example because the class path, not just the record data, is what
+# selects behaviour: the same app also ships SplitHorizon.SimpleCNAME, and
+# SplitHorizon.AddressTranslation, which is not an app-record handler at all.
+# Naming that last one would store a record that resolves to nothing, so the
+# provider checks the class against the installed app and refuses it.
+resource "technitium_record" "api_split" {
+  zone = technitium_zone.internal.name
+  name = "api.example.com"
+  type = "APP"
+  ttl  = 60
+
+  app_name = "Split Horizon"
+  value    = "SplitHorizon.SimpleAddress"
+
+  record_data = jsonencode({
+    public            = ["203.0.113.10"]
+    private           = ["10.1.2.10"]
+    "10.0.0.0/8"      = ["10.1.2.11"]
+  })
+}
+
+# Some apps need no configuration at all, in which case record_data is simply
+# omitted.
+resource "technitium_record" "whatismydns" {
+  zone = technitium_zone.internal.name
+  name = "whoami.example.com"
+  type = "APP"
+
+  app_name = "What Is My Dns"
+  value    = "WhatIsMyDns.App"
+}
+```
+
+#### A name holds at most one APP record
+
+APP records do not form an RRset. Technitium refuses a second APP record at the same
+name even with a different `app_name` or class path, so `(zone, name, APP)` identifies
+the record completely — which is why `terraform import` needs nothing more than the
+class path, and why changing `app_name`, `value` or `record_data` is an in-place
+update rather than a replacement.
+
+~> **An *enabled* address record at the same name silences the app.** Technitium
+permits an `A` or `AAAA` record to sit beside an `APP` record, and while that record
+is enabled it wins outright: the app never answers and nothing reports a problem.
+Measured on Technitium 15.4 — a weighted record returned weighted answers until one
+`A` record was added at that name, after which every answer came from the `A`
+record. This holds for both `WeightedRoundRobin.Address` and
+`WeightedRoundRobin.CNAME`; returning a different record type does not avoid it.
+
+A **disabled** address record does not mask the app — the APP record answers
+normally — which is how a name can be migrated by hand, by disabling the old
+records in the web console rather than deleting them.
+
+That matters here because this provider does not manage a record's disabled flag.
+A disabled record is still a record: it appears in `records/get`, so Terraform
+matches and keeps managing it, but nothing in the configuration says it is
+disabled, and a record Terraform creates is always enabled. So a name taken over
+by hand this way has address records that look managed and inert at the same time.
+Removing them from the configuration deletes them, which is usually what you want;
+re-adding one re-enables it and silences the app again.
+
+#### The app must already be installed
+
+This provider does not install DNS apps — install them from the web console's Apps tab
+or via `/api/apps/downloadAndInstall` first.
+
+Technitium accepts an `app_name` and class path that match nothing installed, returning
+success and storing a record that resolves to nothing. To keep that from reaching the
+zone, the provider checks both against `/api/apps/list` before writing, and refuses:
+
+* an `app_name` no installed app matches;
+* a class path the named app does not provide;
+* a class path that exists but is not an app-record handler — `SplitHorizon.AddressTranslation`,
+  for instance, is a post-processor, and an APP record naming it answers nothing.
+
+-> This check is best-effort: listing apps needs a permission the API token may not
+carry, and a token scoped to zones alone should still be able to manage records. When
+the list cannot be read the check is skipped (logged at `DEBUG`) and the record is
+written as configured.
+
+#### record_data and formatting
+
+`record_data` is stored byte for byte, and equivalent JSON does not register as a
+change: reindenting it, or reordering keys within an object, produces no plan. Array
+order *is* significant — the weighted apps read their address lists as ordered — and a
+payload that is not JSON is compared exactly.
+
+A value that begins with `{` or `[` is validated as JSON at plan time, because
+Technitium parses it on exactly that condition and rejects the record if it does not
+parse.
+
+~> Technitium assigns `recordData` on every update, so an update that omits it stores
+the empty string rather than leaving the stored configuration alone. The provider
+always sends all three fields, which is what keeps a TTL-only change from silently
+emptying the app's configuration. Nothing to configure — but it is worth knowing
+before driving this API by hand.
+
 ### Multiple Records at Same Name (Round-Robin)
 
 ```hcl
@@ -337,9 +487,12 @@ resource "technitium_record" "web2" {
 
 * `name` - (Required, String) FQDN for the record. (Forces replacement.)
 
-* `type` - (Required, String) Record type. Valid values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `SRV`, `PTR`, `NS`, `CAA`, `FWD`. (Forces replacement.)
+* `type` - (Required, String) Record type. Valid values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `SRV`, `PTR`, `NS`, `CAA`, `FWD`, `APP`. (Forces replacement.)
 
 * `value` - (Required, String) Record data. For `FWD`, this is the forwarder address using Technitium name-server address syntax, e.g. `1.1.1.1`, `dns.quad9.net:853 (9.9.9.9)`, or a DoH URL.
+  For `APP`, this is the DNS app **class path** — the handler inside the app that answers
+  the query, e.g. `WeightedRoundRobin.Address` — not the app name. See
+  [APP Records (DNS Apps)](#app-records-dns-apps).
 
 * `ttl` - (Optional, Integer) TTL in seconds. Default: `3600`.
 
@@ -367,6 +520,17 @@ resource "technitium_record" "web2" {
 
 * `proxy_type`, `proxy_address`, `proxy_port`, `proxy_username`, `proxy_password` - (Optional) Proxy settings for `FWD` records. `proxy_password` is sensitive.
 
+* `app_name` - (Optional, String) Name of the installed DNS app serving this record, exactly
+  as the server reports it, e.g. `Weighted Round Robin`. Required for `APP` records. The app
+  must already be installed; this provider does not install DNS apps. See
+  [APP Records (DNS Apps)](#app-records-dns-apps).
+
+* `record_data` - (Optional, String) App-specific configuration for an `APP` record, as the
+  app requires it — usually a JSON document, so `jsonencode(...)` or a heredoc. Some apps
+  need none. Equivalent JSON that differs only in object key order or whitespace does not
+  register as a change; array order is significant. A value beginning with `{` or `[` is
+  validated as JSON at plan time.
+
 * `overwrite` - (Optional, Boolean) Replace existing record set. Default: `true`.
 
 * `comments` - (Optional, String) Free-text comment stored with the record, as shown in the
@@ -381,7 +545,7 @@ resource "technitium_record" "web2" {
 
 In addition to the arguments above, the following computed attributes are exported:
 
-* `id` - Record identifier (`zone::name::type::value` composite key). For MX records: `zone::name::MX::exchange:priority`. For SRV records: `zone::name::SRV::target:priority:weight:port`. For CAA records: `zone::name::CAA::value:flags:tag`. For FWD records: `zone::name::FWD::forwarder:protocol:priority:dnssecValidation`. The `dnssecValidation` field distinguishes otherwise-identical forwarders; the legacy 3-field form `forwarder:protocol:priority` is still accepted on import for backward compatibility.
+* `id` - Record identifier (`zone::name::type::value` composite key). For MX records: `zone::name::MX::exchange:priority`. For SRV records: `zone::name::SRV::target:priority:weight:port`. For CAA records: `zone::name::CAA::value:flags:tag`. For FWD records: `zone::name::FWD::forwarder:protocol:priority:dnssecValidation`. For APP records: `zone::name::APP::classPath`. The `dnssecValidation` field distinguishes otherwise-identical forwarders; the legacy 3-field form `forwarder:protocol:priority` is still accepted on import for backward compatibility.
 
 * `last_modified` - Timestamp of last modification.
 
@@ -407,4 +571,8 @@ terraform import technitium_record.forwarder ".::.::FWD::1.1.1.1:Udp:2:true"
 
 # FWD record, legacy 3-field form (still accepted; dnssec_validation is left unset)
 terraform import technitium_record.forwarder_legacy ".::.::FWD::1.1.1.1:Udp:2"
+
+# APP record (classPath). app_name and record_data are read from the record,
+# so the class path is all the ID has to carry.
+terraform import technitium_record.app "example.com::lb.example.com::APP::WeightedRoundRobin.Address"
 ```
