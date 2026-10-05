@@ -8,7 +8,7 @@
 # handler expects, which for this one is a weighted address list.
 resource "technitium_record" "ntp_weighted" {
   zone = technitium_zone.internal.name
-  name = "ntp.core.example.com"
+  name = "ntp.example.com"
   type = "APP"
   ttl  = 300
 
@@ -17,9 +17,9 @@ resource "technitium_record" "ntp_weighted" {
 
   record_data = jsonencode({
     ipv4Addresses = [
-      { address = "10.1.2.74", weight = 5, enabled = true },
-      { address = "10.1.2.67", weight = 3, enabled = true },
-      { address = "10.1.2.73", weight = 1, enabled = true },
+      { address = "192.0.2.10", weight = 5, enabled = true },
+      { address = "192.0.2.11", weight = 3, enabled = true },
+      { address = "192.0.2.12", weight = 1, enabled = true },
     ]
   })
 

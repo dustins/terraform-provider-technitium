@@ -16,7 +16,7 @@ import (
 const (
 	wrrApp   = "Weighted Round Robin"
 	wrrClass = "WeightedRoundRobin.Address"
-	wrrData  = `{"ipv4Addresses":[{"address":"10.1.2.74","weight":5,"enabled":true}]}`
+	wrrData  = `{"ipv4Addresses":[{"address":"192.0.2.10","weight":5,"enabled":true}]}`
 )
 
 func appModel() *RecordResourceModel {

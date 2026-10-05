@@ -48,7 +48,7 @@ func TestValidateAPPRecord_Valid(t *testing.T) {
 				"type":        "APP",
 				"app_name":    "Weighted Round Robin",
 				"value":       "WeightedRoundRobin.Address",
-				"record_data": `{"ipv4Addresses":[{"address":"10.1.2.74","weight":5,"enabled":true}]}`,
+				"record_data": `{"ipv4Addresses":[{"address":"192.0.2.10","weight":5,"enabled":true}]}`,
 			},
 		},
 		{

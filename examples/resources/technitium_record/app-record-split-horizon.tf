@@ -16,9 +16,9 @@ resource "technitium_record" "api_split" {
   value    = "SplitHorizon.SimpleAddress"
 
   record_data = jsonencode({
-    public            = ["203.0.113.10"]
-    private           = ["10.1.2.10"]
-    "10.0.0.0/8"      = ["10.1.2.11"]
+    public       = ["203.0.113.10"]
+    private      = ["10.0.0.10"]
+    "10.0.0.0/8" = ["10.0.0.11"]
   })
 }
 
